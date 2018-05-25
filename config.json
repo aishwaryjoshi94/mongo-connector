@@ -6,7 +6,7 @@
     "oplogFile": "/var/vcap/mongo-connector/oplog.timestamp",
     "noDump": false,
     "batchSize": -1,
-    "verbosity": 0,
+    "verbosity": 3,
     "continueOnError": false,
 
     "logging": {
@@ -34,53 +34,4 @@
         "__sslCACerts": "Path to concatenated set of certificate authority certificates to validate the other side of the connection",
         "__sslCertificatePolicy": "Policy for validating SSL certificates provided from the other end of the connection. Possible values are 'required' (require and validate certificates), 'optional' (validate but don't require a certificate), and 'ignored' (ignore certificates)."
     },
-
-    "__fields": ["field1", "field2", "field3"],
-
-    "__namespaces": {
-        "excluded.collection": false,
-        "excluded_wildcard.*": false,
-        "*.exclude_collection_from_every_database": false,
-        "included.collection1": true,
-        "included.collection2": {},
-        "included.collection4": {
-            "includeFields": ["included_field", "included.nested.field"]
-        },
-        "included.collection5": {
-            "rename": "included.new_collection5_name",
-            "includeFields": ["included_field", "included.nested.field"]
-        },
-        "included.collection6": {
-            "excludeFields": ["excluded_field", "excluded.nested.field"]
-        },
-        "included.collection7": {
-            "rename": "included.new_collection7_name",
-            "excludeFields": ["excluded_field", "excluded.nested.field"]
-        },
-        "included_wildcard1.*": true,
-        "included_wildcard2.*": true,
-        "renamed.collection1": "something.else1",
-        "renamed.collection2": {
-            "rename": "something.else2"
-        },
-        "renamed_wildcard.*": {
-            "rename": "new_name.*"
-        },
-        "gridfs.collection": {
-            "gridfs": true
-        },
-        "gridfs_wildcard.*": {
-            "gridfs": true
-        }
-    },
-
-    "docManagers": [
-        {
-            "docManager": "doc_manager_simulator",
-            "targetURL": "localhost:9200",
-            "__bulkSize": 1000,
-            "__uniqueKey": "_id",
-            "__autoCommitInterval": null
-        }
-    ]
 }
