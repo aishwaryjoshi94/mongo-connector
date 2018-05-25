@@ -125,22 +125,11 @@ setup(name='mongo-connector',
       platforms=["any"],
       classifiers=filter(None, classifiers.split("\n")),
       install_requires=['pymongo >= 2.9'],
-      packages=["mongo_connector", "mongo_connector.doc_managers"],
-      package_data={
-          'mongo_connector.doc_managers': ['schema.xml']
-      },
+      packages=["mongo_connector"],
       entry_points={
           'console_scripts': [
               'mongo-connector = mongo_connector.connector:main',
           ],
-      },
-      extras_require={
-          "solr": ["solr-doc-manager"],
-          "elastic": ["elastic-doc-manager"],
-          "elastic-aws": ["elastic-doc-manager[aws]"],
-          "elastic2": ["elastic2-doc-manager[elastic2]"],
-          "elastic5": ["elastic2-doc-manager[elastic5]"],
-          "elastic2-aws": ["elastic2-doc-manager[elastic2,aws]"],
       },
       **extra_opts
 )

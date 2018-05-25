@@ -80,7 +80,7 @@ class Connector(threading.Thread):
 
     Creates, runs, and monitors an OplogThread for each replica set found.
     """
-    def __init__(self, mongo_address, doc_managers=None, **kwargs):
+    def __init__(self, mongo_address, **kwargs):
         super(Connector, self).__init__()
 
         # can_run is set to false when we join the thread
@@ -94,15 +94,6 @@ class Connector(threading.Thread):
 
         # connection to the main address
         self.main_conn = None
-
-        # List of DocManager instances
-        if doc_managers:
-            self.doc_managers = doc_managers
-        else:
-            LOG.warning('No doc managers specified, using simulator.')
-            # Avoid circular import on get_mininum_mongodb_version.
-            from mongo_connector.doc_managers import doc_manager_simulator
-            self.doc_managers = (doc_manager_simulator.DocManager(),)
 
         # Password for authentication
         self.auth_key = kwargs.pop('auth_key', None)
@@ -209,8 +200,6 @@ class Connector(threading.Thread):
         """
         self.can_run = False
         super(Connector, self).join()
-        for dm in self.doc_managers:
-            dm.stop()
 
     def write_oplog_progress(self):
         """ Writes oplog progress to file provided by user
@@ -331,15 +320,6 @@ class Connector(threading.Thread):
         LOG.always('Source MongoDB version: %s',
                    self.main_conn.admin.command('buildInfo')['version'])
 
-        for dm in self.doc_managers:
-            name = dm.__class__.__module__
-            module = sys.modules[name]
-            version = 'unknown'
-            if hasattr(module, '__version__'):
-                version = module.__version__
-            elif hasattr(module, 'version'):
-                version = module.version
-            LOG.always('Target DocManager: %s version: %s', name, version)
 
         self.read_oplog_progress()
         conn_type = None
@@ -368,7 +348,7 @@ class Connector(threading.Thread):
 
             # non sharded configuration
             oplog = OplogThread(
-                self.main_conn, self.doc_managers, self.oplog_progress,
+                self.main_conn,  self.oplog_progress,
                 self.namespace_config, **self.kwargs)
             self.shard_set[0] = oplog
             LOG.info('MongoConnector: Starting connection thread %s' %
@@ -382,9 +362,6 @@ class Connector(threading.Thread):
                               " %s unexpectedly stopped! Shutting down" %
                               (str(self.shard_set[0])))
                     self.oplog_thread_join()
-                    for dm in self.doc_managers:
-                        dm.stop()
-                    return
 
                 self.write_oplog_progress()
                 time.sleep(1)
@@ -404,9 +381,6 @@ class Connector(threading.Thread):
                                       "down" %
                                       (str(self.shard_set[shard_id])))
                             self.oplog_thread_join()
-                            for dm in self.doc_managers:
-                                dm.stop()
-                            return
 
                         self.write_oplog_progress()
                         time.sleep(1)
@@ -417,15 +391,12 @@ class Connector(threading.Thread):
                         cause = "The system only uses replica sets!"
                         LOG.exception("MongoConnector: %s", cause)
                         self.oplog_thread_join()
-                        for dm in self.doc_managers:
-                            dm.stop()
-                        return
 
                     shard_conn = self.create_authed_client(
                         hosts, replicaSet=repl_set)
                     self.update_version_from_client(shard_conn)
                     oplog = OplogThread(
-                        shard_conn, self.doc_managers, self.oplog_progress,
+                        shard_conn, self.oplog_progress,
                         self.namespace_config, mongos_client=self.main_conn,
                         **self.kwargs)
                     self.shard_set[shard_id] = oplog
