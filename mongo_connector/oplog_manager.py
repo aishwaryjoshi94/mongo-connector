@@ -54,7 +54,7 @@ class ReplicationLagLogger(threading.Thread):
         checkpoint = self.opman.checkpoint
         if checkpoint is None:
             return
-        newest_write = retry_until_ok(self.opman.get_last_oplog_timestamp)
+        newest_write = retry_until_ok(self.opman.get_oldest_oplog_timestamp)
         if newest_write < checkpoint:
             # OplogThread will perform a rollback, don't log anything
             return
@@ -86,8 +86,7 @@ class OplogThread(threading.Thread):
     Calls the appropriate method on DocManagers for each relevant oplog entry.
     """
     def __init__(self, primary_client,
-                 oplog_progress_dict, namespace_config,
-                 mongos_client=None, **kwargs):
+                 oplog_progress_dict, mongos_client=None, **kwargs):
         super(OplogThread, self).__init__()
 
         self.batch_size = kwargs.get('batch_size', DEFAULT_BATCH_SIZE)
@@ -110,9 +109,6 @@ class OplogThread(threading.Thread):
         # A dictionary that stores OplogThread/timestamp pairs.
         # Represents the last checkpoint for a OplogThread.
         self.oplog_progress = oplog_progress_dict
-
-        # The namespace configuration
-        self.namespace_config = namespace_config
 
         # Whether the collection dump gracefully handles exceptions
         self.continue_on_error = kwargs.get('continue_on_error', False)
@@ -376,193 +372,16 @@ class OplogThread(threading.Thread):
         """Get a pymongo collection from a namespace."""
         database, coll = namespace.split('.', 1)
         return self.primary_client[database][coll]
-
     def dump_collection(self):
         """Dumps collection into the target system.
-
         This method is called when we're initializing the cursor and have no
         configs i.e. when we're starting for the first time.
         """
 
-        timestamp = retry_until_ok(self.get_last_oplog_timestamp)
+        timestamp = retry_until_ok(self.get_oldest_oplog_timestamp)
         if timestamp is None:
             return None
         long_ts = util.bson_ts_to_long(timestamp)
-        # Flag if this oplog thread was cancelled during the collection dump.
-        # Use a list to workaround python scoping.
-        dump_cancelled = [False]
-
-        def get_all_ns():
-            ns_set = []
-            gridfs_ns_set = []
-            db_list = self.namespace_config.get_included_databases()
-            if not db_list:
-                # Only use listDatabases when the configured databases are not
-                # explicit.
-                db_list = retry_until_ok(self.primary_client.database_names)
-            for database in db_list:
-                if database == "config" or database == "local":
-                    continue
-                coll_list = retry_until_ok(
-                    self.primary_client[database].collection_names)
-                for coll in coll_list:
-                    # ignore system collections
-                    if coll.startswith("system."):
-                        continue
-                    # ignore gridfs chunks collections
-                    if coll.endswith(".chunks"):
-                        continue
-                    if coll.endswith(".files"):
-                        namespace = "%s.%s" % (database, coll)
-                        namespace = namespace[:-len(".files")]
-                        if self.namespace_config.gridfs_namespace(namespace):
-                            gridfs_ns_set.append(namespace)
-                    else:
-                        namespace = "%s.%s" % (database, coll)
-                        if self.namespace_config.map_namespace(namespace):
-                            ns_set.append(namespace)
-            return ns_set, gridfs_ns_set
-
-        dump_set, gridfs_dump_set = get_all_ns()
-
-        LOG.debug("OplogThread: Dumping set of collections %s " % dump_set)
-
-        def docs_to_dump(from_coll):
-            last_id = None
-            attempts = 0
-            projection = self.namespace_config.projection(from_coll.full_name)
-            # Loop to handle possible AutoReconnect
-            while attempts < 60:
-                if last_id is None:
-                    cursor = retry_until_ok(
-                        from_coll.find,
-                        projection=projection,
-                        sort=[("_id", pymongo.ASCENDING)]
-                    )
-                else:
-                    cursor = retry_until_ok(
-                        from_coll.find,
-                        {"_id": {"$gt": last_id}},
-                        projection=projection,
-                        sort=[("_id", pymongo.ASCENDING)]
-                    )
-                try:
-                    for doc in cursor:
-                        if not self.running:
-                            # Thread was joined while performing the
-                            # collection dump.
-                            dump_cancelled[0] = True
-                            raise StopIteration
-                        last_id = doc["_id"]
-                        yield doc
-                    break
-                except (pymongo.errors.AutoReconnect,
-                        pymongo.errors.OperationFailure):
-                    attempts += 1
-                    time.sleep(1)
-
-        def upsert_each(dm):
-            num_failed = 0
-            for namespace in dump_set:
-                from_coll = self.get_collection(namespace)
-                mapped_ns = self.namespace_config.map_namespace(namespace)
-                total_docs = retry_until_ok(from_coll.count)
-                num = None
-                for num, doc in enumerate(docs_to_dump(from_coll)):
-                    try:
-                        dm.upsert(doc, mapped_ns, long_ts)
-                    except Exception:
-                        if self.continue_on_error:
-                            LOG.exception(
-                                "Could not upsert document: %r" % doc)
-                            num_failed += 1
-                        else:
-                            raise
-                    if num % 10000 == 0:
-                        LOG.info("Upserted %d out of approximately %d docs "
-                                 "from collection '%s'",
-                                 num + 1, total_docs, namespace)
-                if num is not None:
-                    LOG.info("Upserted %d out of approximately %d docs from "
-                             "collection '%s'",
-                             num + 1, total_docs, namespace)
-            if num_failed > 0:
-                LOG.error("Failed to upsert %d docs" % num_failed)
-
-        def upsert_all(dm):
-            try:
-                for namespace in dump_set:
-                    from_coll = self.get_collection(namespace)
-                    total_docs = retry_until_ok(from_coll.count)
-                    mapped_ns = self.namespace_config.map_namespace(
-                            namespace)
-                    LOG.info("Bulk upserting approximately %d docs from "
-                             "collection '%s'",
-                             total_docs, namespace)
-                    dm.bulk_upsert(docs_to_dump(from_coll),
-                                   mapped_ns, long_ts)
-            except Exception:
-                if self.continue_on_error:
-                    LOG.exception("OplogThread: caught exception"
-                                  " during bulk upsert, re-upserting"
-                                  " documents serially")
-                    upsert_each(dm)
-                else:
-                    raise
-
-        def do_dump(dm, error_queue):
-            try:
-                LOG.debug("OplogThread: Using bulk upsert function for "
-                          "collection dump")
-                upsert_all(dm)
-
-                if gridfs_dump_set:
-                    LOG.info("OplogThread: dumping GridFS collections: %s",
-                             gridfs_dump_set)
-
-                # Dump GridFS files
-                for gridfs_ns in gridfs_dump_set:
-                    mongo_coll = self.get_collection(gridfs_ns)
-                    from_coll = self.get_collection(gridfs_ns + '.files')
-                    dest_ns = self.namespace_config.map_namespace(gridfs_ns)
-                    for doc in docs_to_dump(from_coll):
-                        gridfile = GridFSFile(mongo_coll, doc)
-                        dm.insert_file(gridfile, dest_ns, long_ts)
-            except:
-                # Likely exceptions:
-                # pymongo.errors.OperationFailure,
-                # mongo_connector.errors.ConnectionFailed
-                # mongo_connector.errors.OperationFailed
-                error_queue.put(sys.exc_info())
-
-        # Extra threads (if any) that assist with collection dumps
-        dumping_threads = []
-        # Did the dump succeed for all target systems?
-        dump_success = True
-        # Holds any exceptions we can't recover from
-        errors = queue.Queue()
-
-        # Print caught exceptions
-        try:
-            while True:
-                LOG.critical('Exception during collection dump',
-                             exc_info=errors.get_nowait())
-                dump_success = False
-        except queue.Empty:
-            pass
-
-        if not dump_success:
-            err_msg = "OplogThread: Failed during dump collection"
-            effect = "cannot recover!"
-            LOG.error('%s %s %s' % (err_msg, effect, self.oplog))
-            self.running = False
-            return None
-
-        if dump_cancelled[0]:
-            LOG.warning('Initial collection dump was interrupted. '
-                        'Will re-run the collection dump on next startup.')
-            return None
-
         return timestamp
 
     def _get_oplog_timestamp(self, newest_entry):
@@ -601,7 +420,6 @@ class OplogThread(threading.Thread):
             return False
         except StopIteration:
             return True
-
     def init_cursor(self):
         """Position the cursor appropriately.
 
