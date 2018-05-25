@@ -15,6 +15,7 @@
 """Tails the oplog of a shard and returns entries
 """
 
+import bsonjs
 import bson
 import logging
 try:
@@ -33,6 +34,9 @@ from mongo_connector import errors, util
 from mongo_connector.constants import DEFAULT_BATCH_SIZE
 from mongo_connector.gridfs_file import GridFSFile
 from mongo_connector.util import log_fatal_exceptions, retry_until_ok
+from bson import ObjectId
+from bson.json_util import dumps
+from bson.timestamp import Timestamp
 
 LOG = logging.getLogger(__name__)
 
@@ -138,54 +142,18 @@ class OplogThread(threading.Thread):
             return True, False
 
         # Ignore no-ops
+        #print '********'
+        #print entry
         if entry['op'] == 'n':
             return True, False
-        ns = entry['ns']
-
-        if '.' not in ns:
-            return True, False
-        coll = ns.split('.', 1)[1]
-
-        # Ignore system collections
-        if coll.startswith("system."):
-            return True, False
-
-        # Ignore GridFS chunks
-        if coll.endswith('.chunks'):
-            return True, False
-
-        is_gridfs_file = False
-        if coll.endswith(".files"):
-            ns = ns[:-len(".files")]
-            if self.namespace_config.gridfs_namespace(ns):
-                is_gridfs_file = True
-            else:
-                return True, False
-
-        # Commands should not be ignored, filtered, or renamed. Renaming is
-        # handled by the DocManagers via the CommandHelper class.
-        if coll == "$cmd":
+        else:
             return False, False
-
-        # Rename or filter out namespaces that are ignored keeping
-        # included gridfs namespaces.
-        namespace = self.namespace_config.lookup(ns)
-        if namespace is None:
-            LOG.debug("OplogThread: Skipping oplog entry: "
-                      "'%s' is not in the namespace configuration." % (ns,))
-            return True, False
-
-        # Update the namespace.
-        entry['ns'] = namespace.dest_name
-
-        # Take fields out of the oplog entry that shouldn't be replicated.
-        # This may nullify the document if there's nothing to do.
-        if not self.filter_oplog_entry(
-                entry, include_fields=namespace.include_fields,
-                exclude_fields=namespace.exclude_fields):
-            return True, False
-        return False, is_gridfs_file
-
+    def dump_to_file(self, entry):
+        oplog_entry_in_json_format=dumps(entry)
+        print oplog_entry_in_json_format
+        bson_bytes = bsonjs.loads(oplog_entry_in_json_format)
+        f= open("/var/vcap/mongo-connector/oplog.bson","a+")
+        f.write(bson_bytes)
     @log_fatal_exceptions
     def run(self):
         """Start the oplog worker.
@@ -238,80 +206,8 @@ class OplogThread(threading.Thread):
                         # Sync the current oplog operation
                         operation = entry['op']
                         ns = entry['ns']
-                        timestamp = util.bson_ts_to_long(entry['ts'])
-                        for docman in self.doc_managers:
-                            try:
-                                LOG.debug("OplogThread: Operation for this "
-                                          "entry is %s" % str(operation))
+                        self.dump_to_file(entry)
 
-                                # Remove
-                                if operation == 'd':
-                                    docman.remove(
-                                        entry['o']['_id'], ns, timestamp)
-                                    remove_inc += 1
-
-                                # Insert
-                                elif operation == 'i':  # Insert
-                                    # Retrieve inserted document from
-                                    # 'o' field in oplog record
-                                    doc = entry.get('o')
-                                    # Extract timestamp and namespace
-                                    if is_gridfs_file:
-                                        db, coll = ns.split('.', 1)
-                                        gridfile = GridFSFile(
-                                            self.primary_client[db][coll],
-                                            doc)
-                                        docman.insert_file(
-                                            gridfile, ns, timestamp)
-                                    else:
-                                        docman.upsert(doc, ns, timestamp)
-                                    upsert_inc += 1
-
-                                # Update
-                                elif operation == 'u':
-                                    docman.update(entry['o2']['_id'],
-                                                  entry['o'],
-                                                  ns, timestamp)
-                                    update_inc += 1
-
-                                # Command
-                                elif operation == 'c':
-                                    # use unmapped namespace
-                                    doc = entry.get('o')
-                                    docman.handle_command(doc,
-                                                          entry['ns'],
-                                                          timestamp)
-
-                            except errors.OperationFailed:
-                                LOG.exception(
-                                    "Unable to process oplog document %r"
-                                    % entry)
-                            except errors.ConnectionFailed:
-                                LOG.exception(
-                                    "Connection failed while processing oplog "
-                                    "document %r" % entry)
-
-                        if (remove_inc + upsert_inc + update_inc) % 1000 == 0:
-                            LOG.debug(
-                                "OplogThread: Documents removed: %d, "
-                                "inserted: %d, updated: %d so far" % (
-                                    remove_inc, upsert_inc, update_inc))
-
-                        LOG.debug("OplogThread: Doc is processed.")
-
-                        last_ts = entry['ts']
-
-                        # update timestamp per batch size
-                        # n % -1 (default for self.batch_size) == 0 for all n
-                        if n % self.batch_size == 1:
-                            self.update_checkpoint(last_ts)
-                            last_ts = None
-
-                    # update timestamp after running through oplog
-                    if last_ts is not None:
-                        LOG.debug("OplogThread: updating checkpoint after "
-                                  "processing new oplog entries")
-                        self.update_checkpoint(last_ts)
 
             except (pymongo.errors.AutoReconnect,
                     pymongo.errors.OperationFailure,

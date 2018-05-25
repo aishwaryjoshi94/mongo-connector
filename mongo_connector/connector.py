@@ -197,10 +197,8 @@ class Connector(threading.Thread):
             auth_key = password
         connector = Connector(
             mongo_address=config['mainAddress'],
-            doc_managers=config['docManagers'],
             oplog_checkpoint=os.path.abspath(config['oplogFile']),
             collection_dump=(not config['noDump']),
-            batch_size=config['batchSize'],
             continue_on_error=config['continueOnError'],
             auth_username=config['authentication.adminUsername'],
             auth_key=auth_key,
@@ -521,22 +519,6 @@ def get_config_options():
         "If specified, this flag will ensure that "
         "mongo_connector won't read the entire contents of a "
         "namespace iff --oplog-ts points to an empty file.")
-
-    batch_size = add_option(
-        config_key="batchSize",
-        default=constants.DEFAULT_BATCH_SIZE,
-        type=int)
-
-    # --batch-size specifies num docs to read from oplog before updating the
-    # --oplog-ts config file with current oplog position
-    batch_size.add_cli(
-        "--batch-size", type="int", dest="batch_size", help=
-        "Specify an int to update the --oplog-ts "
-        "config file with latest position of oplog every "
-        "N documents. By default, the oplog config isn't "
-        "updated until we've read through the entire oplog. "
-        "You may want more frequent updates if you are at risk "
-        "of falling behind the earliest timestamp in the oplog")
 
     def apply_verbosity(option, cli_values):
         if cli_values['verbose']:
@@ -934,166 +916,6 @@ def get_config_options():
         "consider. For example, if your metadata is stored in "
         "test.fs.files and chunks are stored in test.fs.chunks, "
         "you can use `--gridfs-set test.fs`.")
-
-    def apply_doc_managers(option, cli_values):
-        if not option.value:
-            if not cli_values['doc_manager'] and not cli_values['target_url']:
-                return
-            option.value = [{}]
-
-        # Command line options should override the first DocManager config.
-        cli_to_config = dict(doc_manager='docManager',
-                             target_url='targetURL',
-                             auto_commit_interval='autoCommitInterval',
-                             unique_key='uniqueKey')
-        first_dm = option.value[0]
-        for cli_name, value in cli_values.items():
-            if value is not None:
-                first_dm[cli_to_config[cli_name]] = value
-
-        # validate doc managers and fill in default values
-        for dm in option.value:
-            if not isinstance(dm, dict):
-                raise errors.InvalidConfiguration(
-                    "Elements of docManagers must be a dict.")
-            if 'docManager' not in dm and 'docManagerClassPath' not in dm:
-                raise errors.InvalidConfiguration(
-                    "Every element of docManagers"
-                    " must contain 'docManager' property.")
-            if not dm.get('targetURL'):
-                dm['targetURL'] = None
-            if not dm.get('uniqueKey'):
-                dm['uniqueKey'] = constants.DEFAULT_UNIQUE_KEY
-            if dm.get('autoCommitInterval') is None:
-                dm['autoCommitInterval'] = constants.DEFAULT_COMMIT_INTERVAL
-            if not dm.get('args'):
-                dm['args'] = {}
-            if not dm.get('bulkSize'):
-                dm['bulkSize'] = constants.DEFAULT_MAX_BULK
-
-            aci = dm['autoCommitInterval']
-            if aci is not None and aci < 0:
-                raise errors.InvalidConfiguration(
-                    "autoCommitInterval must be non-negative.")
-
-        def import_dm_by_name(name):
-            full_name = "mongo_connector.doc_managers.%s.DocManager" % name
-            return import_dm_by_path(full_name)
-
-        def import_dm_by_path(path):
-            # Avoid circular import on get_mininum_mongodb_version.
-            from mongo_connector.doc_managers.doc_manager_base import (
-                DocManagerBase)
-            try:
-                # importlib doesn't exist in 2.6, but __import__ is everywhere
-                package, klass = path.rsplit('.', 1)
-                module = __import__(package, fromlist=(package,))
-                dm_impl = getattr(module, klass)
-                if not issubclass(dm_impl, DocManagerBase):
-                    raise TypeError("DocManager must inherit DocManagerBase.")
-                return dm_impl
-            except ImportError as exc:
-                raise errors.InvalidConfiguration(
-                    "Could not import %s. It could be that this doc manager ha"
-                    "s been moved out of this project and is maintained elsewh"
-                    "ere. Make sure that you have the doc manager installed al"
-                    "ongside mongo-connector. Check the README for a list of a"
-                    "vailable doc managers. ImportError:\n%s" % (package, exc))
-            except (AttributeError, TypeError):
-                raise errors.InvalidConfiguration(
-                    "No definition for DocManager found in %s." % package)
-
-        # instantiate the doc manager objects
-        dm_instances = []
-        for dm in option.value:
-            if 'docManagerClassPath' in dm:
-                DocManager = import_dm_by_path(dm['docManagerClassPath'])
-            else:
-                DocManager = import_dm_by_name(dm['docManager'])
-            kwargs = {
-                'unique_key': dm['uniqueKey'],
-                'auto_commit_interval': dm['autoCommitInterval'],
-                'chunk_size': dm['bulkSize']
-            }
-            for k in dm['args']:
-                if k not in kwargs:
-                    kwargs[k] = dm['args'][k]
-
-            target_url = dm['targetURL']
-            if target_url:
-                dm_instances.append(DocManager(target_url, **kwargs))
-            else:
-                dm_instances.append(DocManager(**kwargs))
-
-        option.value = dm_instances
-
-    doc_managers = add_option(
-        config_key="docManagers",
-        default=None,
-        type=list,
-        apply_function=apply_doc_managers)
-
-    # -d is to specify the doc manager file.
-    doc_managers.add_cli(
-        "-d", "--doc-manager", dest="doc_manager", help=
-        "Used to specify the path to each doc manager "
-        "file that will be used. DocManagers should be "
-        "specified in the same order as their respective "
-        "target addresses in the --target-urls option. "
-        "URLs are assigned to doc managers "
-        "respectively. Additional doc managers are "
-        "implied to have no target URL. Additional URLs "
-        "are implied to have the same doc manager type as "
-        "the last doc manager for which a URL was "
-        "specified. By default, Mongo Connector will use "
-        "'doc_manager_simulator.py'.  It is recommended "
-        "that all doc manager files be kept in the "
-        "doc_managers folder in mongo-connector. For "
-        "more information about making your own doc "
-        "manager, see 'Writing Your Own DocManager' "
-        "section of the wiki")
-
-    # -d is to specify the doc manager file.
-    doc_managers.add_cli(
-        "-t", "--target-url",
-        dest="target_url", help=
-        "Specify the URL to each target system being "
-        "used. For example, if you were using Solr out of "
-        "the box, you could use '-t "
-        "http://localhost:8080/solr' with the "
-        "SolrDocManager to establish a proper connection. "
-        "URLs should be specified in the same order as "
-        "their respective doc managers in the "
-        "--doc-managers option.  URLs are assigned to doc "
-        "managers respectively. Additional doc managers "
-        "are implied to have no target URL. Additional "
-        "URLs are implied to have the same doc manager "
-        "type as the last doc manager for which a URL was "
-        "specified. "
-        "Don't use quotes around addresses. ")
-
-    # -u is to specify the mongoDB field that will serve as the unique key
-    # for the target system,
-    doc_managers.add_cli(
-        "-u", "--unique-key", dest="unique_key", help=
-        "The name of the MongoDB field that will serve "
-        "as the unique key for the target system. "
-        "Note that this option does not apply "
-        "when targeting another MongoDB cluster. "
-        "Defaults to \"_id\".")
-
-    # --auto-commit-interval to specify auto commit time interval
-    doc_managers.add_cli(
-        "--auto-commit-interval", type="int",
-        dest="auto_commit_interval", help=
-        "Seconds in-between calls for the Doc Manager"
-        " to commit changes to the target system. A value of"
-        " 0 means to commit after every write operation."
-        " When left unset, Mongo Connector will not make"
-        " explicit commits. Some systems have"
-        " their own mechanism for adjusting a commit"
-        " interval, which should be preferred to this"
-        " option.")
 
     continue_on_error = add_option(
         config_key="continueOnError",
