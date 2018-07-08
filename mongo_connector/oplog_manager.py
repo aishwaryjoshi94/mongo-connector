@@ -18,6 +18,9 @@
 import bsonjs
 import bson
 import logging
+import sys
+import os
+
 try:
     import Queue as queue
 except ImportError:
@@ -108,7 +111,7 @@ class OplogThread(threading.Thread):
 
         # A dictionary that stores OplogThread/timestamp pairs.
         # Represents the last checkpoint for a OplogThread.
-        self.oplog_progress = oplog_progress_dict
+        self.oplog_progress = oplog_progress_dict ###### ******** DISCUSS
 
         # Whether the collection dump gracefully handles exceptions
         self.continue_on_error = kwargs.get('continue_on_error', False)
@@ -140,12 +143,39 @@ class OplogThread(threading.Thread):
             return True, False
         else:
             return False, False
+    def get_oplog_file_name(self, epoch_time, oplog_dump_interval=120):
+        slot_id = int(epoch_time/oplog_dump_interval)
+        start_time =  int(slot_id*oplog_dump_interval)
+        end_time = int((slot_id+1)*oplog_dump_interval)
+        return (start_time, end_time)
+
     def dump_to_file(self, entry):
-        oplog_entry_in_json_format=dumps(entry)
-        print oplog_entry_in_json_format
+        oplog_entry_in_json_format=dumps(entry)  ## DISCUSS dumps
+        # Reading ts value from Timestamp(ts,i)
+        oplog_entry_epoch_time = entry['ts'].time
+        LOG.info("timestamp : '%s'",oplog_entry_epoch_time)
+        start_time, end_time = self.get_oplog_file_name(oplog_entry_epoch_time)
+        oplog_file_name = str(start_time) + '-' + str(end_time) + '.bson'
+        LOG.info("timestamp : '%s' belong '%s'",oplog_entry_epoch_time, oplog_file_name)
+        LOG.info("oplogEntry '%s'",oplog_entry_in_json_format)
         bson_bytes = bsonjs.loads(oplog_entry_in_json_format)
-        f= open("/var/vcap/mongo-connector/oplog.bson","a+")
+        f= open("/var/vcap/store/oplogDump/"+oplog_file_name,"a")
         f.write(bson_bytes)
+        f.close()
+        self.write_to_localdb(oplog_file_name)
+
+
+        #call python file to save to local db
+        #var1='2937cd86' #TODO
+        #var2='f3b1db1f32bb530a8200b290830391ed'
+        #os.system('python update_localdb.py --serviceUserName {} --serviceUserPassword {}'.format(var1,var2))
+
+
+    def write_to_localdb(filename):
+        print("**** fileName : ",filename)
+        mongos_client.createdfiles.insert({"_id":filename})
+
+
     @log_fatal_exceptions
     def run(self):
         """Start the oplog worker.
@@ -527,3 +557,4 @@ class OplogThread(threading.Thread):
                   str(ret_val))
         self.checkpoint = ret_val
         return ret_val
+
