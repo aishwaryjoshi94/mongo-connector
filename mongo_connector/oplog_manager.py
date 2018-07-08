@@ -159,7 +159,8 @@ class OplogThread(threading.Thread):
         LOG.info("timestamp : '%s' belong '%s'",oplog_entry_epoch_time, oplog_file_name)
         LOG.info("oplogEntry '%s'",oplog_entry_in_json_format)
         bson_bytes = bsonjs.loads(oplog_entry_in_json_format)
-        f= open("/var/vcap/store/oplogDump/"+oplog_file_name,"a")
+        #Python3 requires file to be opened with binary format
+        f= open("/var/vcap/store/oplogDump/"+oplog_file_name,"ab")
         f.write(bson_bytes)
         f.close()
         self.write_to_localdb(oplog_file_name)
@@ -557,4 +558,3 @@ class OplogThread(threading.Thread):
                   str(ret_val))
         self.checkpoint = ret_val
         return ret_val
-
